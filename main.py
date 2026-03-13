@@ -472,6 +472,12 @@ def _cleanup_after_analysis(serial: str, package_id: str, proxy_port: int):
     except subprocess.TimeoutExpired:
         logger.warning(f"[{serial}] Timeout désinstallation {package_id}")
 
+    # Fermeture des apps résiduelles + vérification mode avion
+    adb_utils.close_all_apps(serial)
+    logger.info(f"[{serial}] Apps résiduelles fermées")
+    if adb_utils.disable_airplane_mode_if_on(serial):
+        logger.warning(f"[{serial}] Mode avion était actif — désactivé avant prochaine analyse")
+
     # Vérification connectivité hôte
     if not check_host_internet_connectivity():
         logger.warning(f"[{serial}] Connectivité hôte perdue après nettoyage!")

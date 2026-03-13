@@ -846,6 +846,54 @@ def get_emulator_size(device_id, adb_path="adb", retries=5, delay=3):
 
     raise RuntimeError(f"get_emulator_size échoué après {retries} tentatives: {last_error}")
 
+def close_all_apps(device_id: str):
+    """
+    Retourne à l'écran d'accueil et tue toutes les apps en arrière-plan.
+    À appeler entre deux analyses pour nettoyer les apps résiduelles.
+    """
+    try:
+        subprocess.run(
+            [ADB_BINARY, "-s", device_id, "shell", "input", "keyevent", "KEYCODE_HOME"],
+            timeout=5, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        subprocess.run(
+            [ADB_BINARY, "-s", device_id, "shell", "am", "kill-all"],
+            timeout=10, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+    except Exception as e:
+        print(f"[{device_id}] Erreur close_all_apps: {e}")
+
+
+def disable_airplane_mode_if_on(device_id: str) -> bool:
+    """
+    Vérifie si le mode avion est actif et le désactive si nécessaire.
+    Retourne True si le mode avion était actif (et a été désactivé).
+    """
+    try:
+        result = subprocess.run(
+            [ADB_BINARY, "-s", device_id, "shell", "settings", "get", "global", "airplane_mode_on"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.stdout.strip() == "1":
+            print(f"[{device_id}] Mode avion détecté — désactivation...")
+            subprocess.run(
+                [ADB_BINARY, "-s", device_id, "shell", "settings", "put", "global", "airplane_mode_on", "0"],
+                timeout=10, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            subprocess.run(
+                [ADB_BINARY, "-s", device_id, "shell", "am", "broadcast",
+                 "-a", "android.intent.action.AIRPLANE_MODE", "--ez", "state", "false"],
+                timeout=10, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            time.sleep(3)
+            print(f"[{device_id}] Mode avion désactivé")
+            return True
+        return False
+    except Exception as e:
+        print(f"[{device_id}] Erreur disable_airplane_mode_if_on: {e}")
+        return False
+
+
 def android_has_internet(device_id: str) -> bool:
     """
     Vérifie si l'émulateur Android a accès à Internet.

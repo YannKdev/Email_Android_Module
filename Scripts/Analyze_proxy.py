@@ -949,9 +949,9 @@ def analyze_app(package_id, device_id, port, health_check_callback=None):
                 health_check_callback()
 
             if not adb_utils.android_has_internet(device_id):
-                logger.warning(f"[{device_id}] ATTENTION: L'émulateur n'a pas accès à Internet!")
+                logger.warning(f"[{device_id}] [internet: KO]")
             else:
-                logger.info(f"[{device_id}] Connectivité Internet Android OK")
+                logger.info(f"[{device_id}] [internet: OK]")
 
             return _run_analysis(device_id, package_id, screen_w, screen_h, health_check_callback, frida_monitor)
 
