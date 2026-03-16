@@ -332,10 +332,10 @@ def reset_Frida_server(device_id: str) -> bool:
         return "frida-server" in output and "grep" not in output
 
     def start_frida_server():
-        """Tente de démarrer frida-server. Retourne (success, error_msg)."""
-        # Lancer frida-server en arrière-plan avec nohup
+        """Tente de démarrer frida-server via Magisk su. Retourne (success, error_msg)."""
+        # Sur Play Store/Magisk : adb root indisponible → su -c obligatoire
         proc = subprocess.Popen(
-            f'{ADB_BINARY} -s {device_id} shell "nohup /data/local/tmp/frida-server >/dev/null 2>&1 &"',
+            f'{ADB_BINARY} -s {device_id} shell "su -c \'nohup /data/local/tmp/frida-server >/dev/null 2>&1 &\'"',
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -362,9 +362,9 @@ def reset_Frida_server(device_id: str) -> bool:
         return False, output
 
     def kill_frida_server():
-        """Kill frida-server."""
+        """Kill frida-server via Magisk su."""
         subprocess.run(
-            f'{ADB_BINARY} -s {device_id} shell "pkill frida-server"',
+            f'{ADB_BINARY} -s {device_id} shell "su -c \'pkill frida-server\'"',
             capture_output=True,
             shell=True
         )

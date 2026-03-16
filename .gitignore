@@ -26,6 +26,10 @@ pipeline.pid
 *.png
 *.jpeg
 *.jpg
+!assets/
+
+# Results
+results/
 
 # Node (Frida tests)
 Frida_hook/test/node_modules/

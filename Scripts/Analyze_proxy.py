@@ -133,6 +133,7 @@ class FridaMonitor:
         self.device_id = device_id
         self.crash_detected = threading.Event()
         self.crash_error = None
+        self.play_store_detected = threading.Event()
         self._stop_event = threading.Event()
         self._terminating = False  # True quand on arrête volontairement Frida
         self._monitor_thread = None
@@ -205,6 +206,10 @@ class FridaMonitor:
                             continue
                         if not self._terminating:
                             logger.info(f"[Frida {self.device_id}] {line_str}")
+                        if "[FRIDA_PLAY_STORE_REQUIRED]" in line_str:
+                            if not self.play_store_detected.is_set():
+                                logger.info(f"[{self.device_id}] Play Store redirect intercepté par Frida")
+                            self.play_store_detected.set()
                         self._check_for_crash(line_str)
                 except (ValueError, OSError):
                     # Stream fermé pendant la lecture
@@ -458,7 +463,7 @@ class SimpleCaptureAddon:
         self._save_archive_file()
 
         # Filtrage du bruit Google
-        if any(x in url for x in ["google.com", "gstatic.com", "googleapis.com"]):
+        if any(x in url for x in ["accounts.google.com", "fonts.gstatic.com"]):
             return
 
         # Ne stocker QUE si ça matche les termes recherchés
@@ -556,7 +561,7 @@ def _tap_submit(device_id: str, resp: dict, screen_w: int, screen_h: int) -> boo
         x=screen_w * resp["submit_button"]["x"],
         y=screen_h * resp["submit_button"]["y"],
     )
-    time.sleep(10)
+    time.sleep(15)
     return True
 
 
@@ -614,7 +619,8 @@ def _navigate_to_login(
             health_check_callback()
         if frida_monitor:
             frida_monitor.check_crash()
-        logger.info(f"[{device_id}] Navigation itération {it}/{max_attempts}")
+            if frida_monitor.play_store_detected.is_set():
+                return AnalysisResult.PLAY_STORE_REQUIRED
         check_foreground(device_id, package_id)
         resp = utils_openai.analyze_login_entry(
             device_id,
@@ -625,7 +631,6 @@ def _navigate_to_login(
             already_tapped=already_tapped,
             same_screen_count=same_screen_count,
         )
-        logger.info(f"[{device_id}] Réponse IA: etat={resp['etat']}")
         current_hash = _ui_hash(device_id)
         if current_hash and current_hash == previous_hash:
             same_screen_count += 1
@@ -634,11 +639,10 @@ def _navigate_to_login(
         previous_hash = current_hash
 
         if same_screen_count >= 3:
-            logger.warning(f"[{device_id}] UI inchangé {same_screen_count} fois de suite → FAILED_GO_TO_LOGIN")
+            logger.warning(f"[{device_id}] UI inchangé {same_screen_count} fois de suite → FAILED_GO_TO_LOGIN — {it}/{max_attempts}")
             return AnalysisResult.FAILED_GO_TO_LOGIN
 
         if resp["etat"] == "NEED_SCREENSHOT":
-            logger.info(f"[{device_id}] IA demande un screenshot, relance avec image...")
             check_foreground(device_id, package_id)
             resp = utils_openai.analyze_login_entry(
                 device_id,
@@ -649,36 +653,35 @@ def _navigate_to_login(
                 already_tapped=already_tapped,
                 same_screen_count=same_screen_count,
             )
-            logger.info(f"[{device_id}] Réponse IA (avec screenshot): etat={resp['etat']}")
 
         if resp["etat"] in ("MODALS", "OTHER"):
             where_tap = resp.get("where_tap")
             if not where_tap:
-                logger.warning(f"[{device_id}] {resp['etat']} sans where_tap, itération ignorée")
+                logger.warning(f"[{device_id}] {resp['etat']} sans where_tap — {it}/{max_attempts}")
                 time.sleep(2)
                 continue
             if where_tap.get("action") == "BACK":
-                logger.info(f"[{device_id}] Action BACK pour {resp['etat']}")
+                logger.info(f"[{device_id}] BACK pour {resp['etat']} — {it}/{max_attempts}")
                 adb_utils.adb_back(device_id)
             else:
                 tap_x = screen_w * where_tap["x"]
                 tap_y = screen_h * where_tap["y"]
-                logger.info(f"[{device_id}] Tap sur ({tap_x:.0f}, {tap_y:.0f}) pour {resp['etat']}")
+                logger.info(f"[{device_id}] Tap ({tap_x:.0f}, {tap_y:.0f}) pour {resp['etat']} — {it}/{max_attempts}")
                 adb_utils.tap(device_id, x=tap_x, y=tap_y)
                 already_tapped.append({
                     "name": where_tap.get("name", ""),
                     "x": where_tap["x"],
                     "y": where_tap["y"],
                 })
-            time.sleep(5)
+            time.sleep(3)
         elif resp["etat"] in ("NO_LOGIN", "NO_EMAIL_LOGIN"):
-            logger.info(f"[{device_id}] {resp['etat']} — pas de login email, fin analyse")
+            logger.info(f"[{device_id}] {resp['etat']} — pas de login email — {it}/{max_attempts}")
             return AnalysisResult.NO_LOGIN
         elif resp["etat"] == "LOGIN_EMAIL":
-            logger.info(f"[{device_id}] Page login trouvée en {it} étape(s).")
+            logger.info(f"[{device_id}] Page login trouvée — {it}/{max_attempts}")
             return None
         else:
-            logger.warning(f"[{device_id}] État non géré: {resp['etat']}")
+            logger.warning(f"[{device_id}] État non géré: {resp['etat']} — {it}/{max_attempts}")
     logger.warning(f"[{device_id}] Max tentatives atteint sans trouver login")
     return AnalysisResult.FAILED_GO_TO_LOGIN
 
@@ -715,7 +718,7 @@ def _handle_email_unique(
     adb_utils.press_enter(device_id)
     time.sleep(2)
     adb_utils.hide_keyboard(device_id)
-    time.sleep(3)
+    time.sleep(1)
     check_foreground(device_id, package_id)
     if _tap_submit(device_id, resp, screen_w, screen_h):
         logger.info(f"[{device_id}] Submitted fake email on login page (Email only).")
@@ -761,7 +764,7 @@ def _handle_register_page(
 
 def _handle_email_mdp(
     device_id: str, resp: dict, screen_w: int, screen_h: int,
-    package_id: str, max_register_attempts: int,
+    package_id: str,
 ) -> AnalysisResult:
     _focus_field(device_id, screen_w * resp["email_field"]["x"], screen_h * resp["email_field"]["y"])
     adb_utils.type_text(device_id, text="test@gmail.com")
@@ -777,25 +780,12 @@ def _handle_email_mdp(
     adb_utils.press_enter(device_id)
     time.sleep(2)
     adb_utils.hide_keyboard(device_id)
-    time.sleep(3)
+    time.sleep(1)
     submitted = _tap_submit(device_id, resp, screen_w, screen_h)
     logger.info(
-        f"[{device_id}] {'Submitted fake email+password' if submitted else 'No submit button (Email + Password)'}. Analyzing page..."
+        f"[{device_id}] {'Submitted fake email+password' if submitted else 'No submit button (Email + Password)'}."
     )
-    _snapshot(device_id, package_id)
-    resp = utils_openai.analyze_email_exists(device_id, package_name=package_id)
-    if resp["etat"] == "INFO_EMAIL":
-        logger.info(f"[{device_id}] Email info found!")
-        return AnalysisResult.END_EMAIL_MDP_OK
-    if resp["etat"] not in ("NO_INFO_EMAIL", "ERROR"):
-        return AnalysisResult.ERROR_EMAIL_CHECK_VALUE
-    logger.info(
-        f"[{device_id}] {'Error on analyzing page' if resp['etat'] == 'ERROR' else 'No email info found'}. Try register page..."
-    )
-    check_foreground(device_id, package_id)
-    if not _navigate_to_register(device_id, screen_w, screen_h, package_id, max_register_attempts):
-        return AnalysisResult.NO_REGISTER
-    return _handle_register_page(device_id, screen_w, screen_h, package_id)
+    return AnalysisResult.END_EMAIL_MDP_OK
 
 
 # ---------------------------------------------------------------------------
@@ -806,11 +796,13 @@ def _run_analysis(
     device_id: str, package_id: str, screen_w: int, screen_h: int,
     health_check_callback, frida_monitor,
 ) -> AnalysisResult:
-    """Logique pure d'analyse UI — navigation, login, register."""
-    MAX_LOGIN_ATTEMPTS    = 7
-    MAX_REGISTER_ATTEMPTS = 3
+    """Logique pure d'analyse UI — navigation, login."""
+    MAX_LOGIN_ATTEMPTS = 8
 
     if _check_play_store_popup(device_id):
+        return AnalysisResult.PLAY_STORE_REQUIRED
+    if frida_monitor and frida_monitor.play_store_detected.is_set():
+        logger.info(f"[{device_id}] Play Store redirect détecté par Frida avant navigation")
         return AnalysisResult.PLAY_STORE_REQUIRED
 
     nav_result = _navigate_to_login(
@@ -818,11 +810,8 @@ def _run_analysis(
         MAX_LOGIN_ATTEMPTS, health_check_callback, frida_monitor,
     )
     if nav_result == AnalysisResult.FAILED_GO_TO_LOGIN:
-        logger.info(f"[{device_id}] Login introuvable après {MAX_LOGIN_ATTEMPTS} tentatives, essai page register...")
-        check_foreground(device_id, package_id)
-        if not _navigate_to_register(device_id, screen_w, screen_h, package_id, MAX_REGISTER_ATTEMPTS):
-            return AnalysisResult.NO_REGISTER
-        return _handle_register_page(device_id, screen_w, screen_h, package_id)
+        logger.info(f"[{device_id}] Login introuvable après {MAX_LOGIN_ATTEMPTS} tentatives.")
+        return AnalysisResult.NO_LOGIN
     if nav_result is not None:
         return nav_result
 
@@ -835,7 +824,7 @@ def _run_analysis(
     if resp["etat"] == "EMAIL_UNIQUE":
         return _handle_email_unique(device_id, resp, screen_w, screen_h, package_id)
     if resp["etat"] == "EMAIL_MDP":
-        return _handle_email_mdp(device_id, resp, screen_w, screen_h, package_id, MAX_REGISTER_ATTEMPTS)
+        return _handle_email_mdp(device_id, resp, screen_w, screen_h, package_id)
     if resp["etat"] == "NO_LOGIN":
         logger.info(f"[{device_id}] No login page found.")
         return AnalysisResult.NO_LOGIN
@@ -864,6 +853,8 @@ def analyze_app(package_id, device_id, port, health_check_callback=None):
         RuntimeError: Si l'émulateur devient offline pendant l'analyse
         InterruptedError: Si un arrêt global est demandé
     """
+    utils_openai.reset_token_counter()
+
     if health_check_callback:
         health_check_callback()
 
@@ -872,14 +863,10 @@ def analyze_app(package_id, device_id, port, health_check_callback=None):
     proxy_proc.daemon = True
     proxy_proc.start()
 
-    logger.info(f"[{device_id}] Attente que le proxy soit prêt sur port {port}...")
-    if wait_for_tcp_port(port=port, timeout=30):
-        logger.info(f"[{device_id}] Proxy prêt sur port {port}")
-    else:
-        logger.warning(f"[{device_id}] Timeout en attendant le proxy sur port {port}, on continue quand même...")
+    if not wait_for_tcp_port(port=port, timeout=30):
+        logger.warning(f"[{device_id}] Timeout proxy port {port}, on continue quand même...")
 
     ADB_BINARY = "adb"
-    logger.info(f"[{device_id}] Configuration du proxy Android...")
     subprocess.run(
         f"{ADB_BINARY} -s {device_id} shell settings put global http_proxy :0",
         shell=True, check=True, timeout=10,
@@ -888,11 +875,8 @@ def analyze_app(package_id, device_id, port, health_check_callback=None):
         f"{ADB_BINARY} -s {device_id} shell settings put global http_proxy 10.0.2.2:{port}",
         shell=True, check=True, timeout=10,
     )
-    logger.info(f"[{device_id}] Proxy Android configuré sur 10.0.2.2:{port}")
 
-    logger.info(f"[{device_id}] Reset Frida server...")
     adb_utils.reset_Frida_server(device_id)
-    logger.info(f"[{device_id}] Frida server prêt")
 
     # Checkpoint 1
     if health_check_callback:
@@ -916,7 +900,7 @@ def analyze_app(package_id, device_id, port, health_check_callback=None):
         content = content.replace("const PROXY_PORT = 8080;", f"const PROXY_PORT = {port};")
         with open(dynamic_config_path, "w", encoding="utf-8") as f:
             f.write(content)
-        logger.info(f"[{device_id}] Config générée sur port {port}")
+        logger.info(f"[{device_id}] ✅ Configuration (Frida+proxy) : OK")
 
         try:
             def p(path): return os.path.abspath(os.path.join(BASE_PATH, path))
@@ -933,7 +917,7 @@ def analyze_app(package_id, device_id, port, health_check_callback=None):
                 "-l", p("Frida_hook/android/android-disable-root-detection.js"),
                 "-f", package_id,
             ]
-            logger.info(f"[{device_id}] Spawning {package_id}...")
+            logger.info(f"[{device_id}] 🚀 Spawning {package_id}...")
             frida_proc = subprocess.Popen(frida_cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             frida_monitor = FridaMonitor(frida_proc, device_id)
             frida_monitor.start()
@@ -976,6 +960,12 @@ def analyze_app(package_id, device_id, port, health_check_callback=None):
         return "ERROR_DURING_ANALYSIS"
 
     finally:
+        tokens = utils_openai.get_token_count()
+        logger.info(
+            f"[{device_id}] [{package_id}] tokens OpenAI total — "
+            f"input: {tokens['input']} | output: {tokens['output']} | "
+            f"total: {tokens['input'] + tokens['output']}"
+        )
         # 1. Signaler l'arrêt volontaire avant de terminer Frida
         if frida_monitor:
             frida_monitor.set_terminating()
@@ -1002,18 +992,7 @@ def analyze_app(package_id, device_id, port, health_check_callback=None):
                 logger.warning(f"[{device_id}] Proxy ne répond pas au terminate, kill forcé...")
                 proxy_proc.kill()
                 proxy_proc.join(timeout=2)
-        logger.info(f"[{device_id}] Proxy sur port {port} fermé.")
         time.sleep(1)
-        har_file = log_file.replace(".jsonl", ".har")
-        if os.path.exists(har_file) and os.path.getsize(har_file) > 0:
-            logger.info(f"[{device_id}] Fichier HAR disponible pour le worker: {har_file}")
-        else:
-            logger.info(f"[{device_id}] Aucun fichier HAR généré (aucune correspondance réseau).")
-        archive_file = log_file.replace(".jsonl", "_all.har")
-        if os.path.exists(archive_file) and os.path.getsize(archive_file) > 0:
-            logger.info(f"[{device_id}] Archive complète disponible: {archive_file}")
-        else:
-            logger.info(f"[{device_id}] Aucune requête archivée (archive vide).")
 
 def transfer_app(package, source, target):
     workdir = os.path.join("temp", source, package)

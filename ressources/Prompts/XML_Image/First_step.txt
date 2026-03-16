@@ -28,6 +28,10 @@ Si l'écran n'est pas une page de login email mais qu'il existe un chemin plausi
 - "etat": "OTHER"
 - "where_tap": coordonnées du bouton le plus probable menant à la connexion email
 
+PRIORITÉ ABSOLUE dans OTHER :
+- Un lien "Log in", "Already have an account", "Sign in" (même non marqué clickable) DOIT être tapé EN PRIORITÉ sur tout bouton "Sign up with Email" / "Register"
+- "Sign up with Email", "Register with email", "Create account with email" sont des boutons d'INSCRIPTION, PAS de login — ne pas les confondre
+
 4. NO_EMAIL_LOGIN
 Si l'écran de connexion ne propose MANIFESTEMENT que des options sociales (Google, Facebook, Apple, téléphone) sans aucun lien vers un login par email :
 - "etat": "NO_EMAIL_LOGIN", "where_tap": null

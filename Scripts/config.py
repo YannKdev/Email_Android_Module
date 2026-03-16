@@ -52,11 +52,11 @@ TEST_PACKAGES = [
 
 if IS_PROD or IS_TEST:
     # ============== PRODUCTION (Ubuntu Server) ==============
+    # AVDs Play Store rootés avec Magisk + Play Integrity Fix
+    # Setup : rootAVD (https://gitlab.com/newbit/rootAVD) sur image google_apis_playstore x86_64
     AVD_MAPPING = {
-        "emulator-5554": {"avd": "Root_1", "type": "ROOT"},
-        "emulator-5556": {"avd": "Root_2", "type": "ROOT"},
-        #"emulator-5554": {"avd": "Root_AOSP_1", "type": "ROOT"},
-        #"emulator-5556": {"avd": "Root_2", "type": "ROOT"},
+        "emulator-5554": {"avd": "Magisk_1", "type": "MAGISK"},
+        "emulator-5556": {"avd": "Magisk_2", "type": "MAGISK"},
     }
 
     # Chemins Ubuntu - A MODIFIER selon ton installation
@@ -72,8 +72,8 @@ if IS_PROD or IS_TEST:
     )
 
     # Delais (serveur peut etre plus lent)
-    STABILIZATION_DELAY = 30
-    POPUP_CHECK_DELAY = 15
+    STABILIZATION_DELAY = 15
+    POPUP_CHECK_DELAY = 5
     STARTUP_DELAY_BETWEEN_EMULATORS = 15
 
     # Dossier racine contenant les APKs : {PACKAGES_BASE_PATH}/{package_id}/*.apk
@@ -89,8 +89,8 @@ if IS_PROD or IS_TEST:
 else:
     # ============== DEVELOPPEMENT (Windows) ==============
     AVD_MAPPING = {
-        "emulator-5554": {"avd": "Root", "type": "ROOT"},
-        #"emulator-5556": {"avd": "Root_2", "type": "ROOT"},
+        "emulator-5554": {"avd": "Magisk_1", "type": "MAGISK"},
+        "emulator-5556": {"avd": "Magisk_2", "type": "MAGISK"},
     }
 
     # Chemins Windows (dans le PATH)
@@ -107,8 +107,8 @@ else:
     )
 
     # Delais
-    STABILIZATION_DELAY = 30
-    POPUP_CHECK_DELAY = 15
+    STABILIZATION_DELAY = 15
+    POPUP_CHECK_DELAY = 5
     STARTUP_DELAY_BETWEEN_EMULATORS = 15
 
     # Dossier racine contenant les APKs : {PACKAGES_BASE_PATH}/{package_id}/*.apk
@@ -147,28 +147,47 @@ class _EmulatorFilter(logging.Filter):
         return self.serial in record.getMessage()
 
 
+class _CleanFormatter(logging.Formatter):
+    """Formatter unifié : datetime uniquement au premier message, emojis pour WARNING/ERROR, pas de [INFO]."""
+    _first_logged = False
+
+    def format(self, record: logging.LogRecord) -> str:
+        msg = record.getMessage()
+        if record.exc_info:
+            msg = msg + '\n' + self.formatException(record.exc_info)
+
+        if record.levelno >= logging.ERROR:
+            prefix = "❌ "
+        elif record.levelno >= logging.WARNING:
+            prefix = "⚠️  "
+        else:
+            prefix = ""
+
+        if not _CleanFormatter._first_logged:
+            _CleanFormatter._first_logged = True
+            ts = self.formatTime(record, '%Y-%m-%d %H:%M:%S')
+            return f"{ts}  {prefix}{msg}"
+
+        return f"{prefix}{msg}"
+
+
 def setup_logging():
     """Configure le logging selon le mode."""
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
 
-    # Format des logs
-    formatter = logging.Formatter(
-        '%(asctime)s [%(levelname)s] %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-
     # Supprimer les logs HTTP du SDK OpenAI (httpx)
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    # Supprimer les warnings TLS de Google Play Services (certificate pinning attendu)
+    logging.getLogger("mitmproxy.proxy.layers.tls").setLevel(logging.ERROR)
 
     # Handler console (toujours actif)
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(formatter)
+    console_handler.setFormatter(_CleanFormatter())
     logger.addHandler(console_handler)
 
     # Handler fichier rotatif (PROD uniquement)
     if LOG_TO_FILE and LOG_FILE:
-        # Creer le dossier logs/ si necessaire
         if LOG_DIR:
             os.makedirs(LOG_DIR, exist_ok=True)
 
@@ -178,7 +197,7 @@ def setup_logging():
             backupCount=LOG_BACKUP_COUNT,
             encoding='utf-8'
         )
-        file_handler.setFormatter(formatter)
+        file_handler.setFormatter(_CleanFormatter())
         logger.addHandler(file_handler)
 
     return logger
@@ -195,10 +214,6 @@ def setup_emulator_logger(serial: str) -> None:
 
     os.makedirs(LOG_DIR, exist_ok=True)
 
-    formatter = logging.Formatter(
-        '%(asctime)s [%(levelname)s] %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
     serial_safe = serial.replace("-", "_")
     handler = RotatingFileHandler(
         os.path.join(LOG_DIR, f"{serial_safe}.log"),
@@ -206,7 +221,7 @@ def setup_emulator_logger(serial: str) -> None:
         backupCount=LOG_BACKUP_COUNT,
         encoding='utf-8'
     )
-    handler.setFormatter(formatter)
+    handler.setFormatter(_CleanFormatter())
     handler.addFilter(_EmulatorFilter(serial))
     logging.getLogger().addHandler(handler)
 

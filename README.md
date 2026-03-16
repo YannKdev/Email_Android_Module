@@ -1,17 +1,19 @@
 # Email Android Module
 
-Pipeline automatisé pour analyser des applications Android sur émulateur rooté.
-Le système charge des APKs, intercepte le trafic réseau via Frida + mitmproxy (bypass SSL/pinning), et utilise la vision OpenAI pour détecter les formulaires de connexion — en stockant les résultats dans PostgreSQL.
+Pipeline automatisé pour récupérer les endpoints API de login email d'applications android à couts réduits (architecture x86 pour le serveur et tokens IA limités).
+Automatisation du téléchargement et analyse des applications  sur émulateur rooté.
+Le système charge des APKs, intercepte le trafic réseau via Frida + mitmproxy (bypass SSL/pinning), et navigue avec décision IA pour détecter les formulaires de connexion. Les résultats sont stockés en PostgreSQL.
 
 Démo : [osint-email-android.demo-yann.ovh](https://osint-email-android.demo-yann.ovh/)
 
-> La récupération des APKs en local n'est pas publié dans ce projet.
+![Screenshot de la démo](assets/screenshot_demo.png)
+
 
 ---
 
 ## Architecture
 
-Un seul émulateur rooté est utilisé :
+Plusieurs émulateurs rootés en parallèle :
 
 ```text
 main.py
@@ -33,7 +35,7 @@ main.py
 
 - Python 3.11+
 - Android SDK (ADB + Emulator)
-- Un AVD rooté : `Root`
+- Un AVD PlayStore rooté : `Root`
 - PostgreSQL
 - Clé API OpenAI
 - [Frida](https://frida.re/) + [mitmproxy](https://mitmproxy.org/)
@@ -82,17 +84,7 @@ python main.py --prod    # Prod (Linux headless)
 - Validé sur une configuration précise — d'autres versions d'AVD peuvent casser le pipeline.
 - Dépendance à l'API OpenAI (remplaçable par tout autre LLM).
 - Taux d'extraction d'APIs reste faible (voir partie résultats)
-
----
-
-## Projet PlayStore + Repack
-
-Projet en cours de développement qui cible deux cas non couverts par ce pipeline :
-
-- Les apps qui crashent avec Frida (émulateur x86, incompatibilités natives)
-- Les apps qui nécessitent le Play Store pour fonctionner
-
-Approche : repack de l'APK directement, sans Frida.
+- L'émulation sur x86 implique une detection par le Play Integrity Check
 
 ---
 

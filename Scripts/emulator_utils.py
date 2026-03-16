@@ -61,40 +61,36 @@ def wait_for_tcp_port(host: str = "127.0.0.1", port: int = 5554, timeout: int = 
 
 
 def ensure_root_environment(serial: str) -> bool:
-    """Passe l'émulateur en root + désactive SELinux (setenforce 0)."""
+    """
+    Vérifie que Magisk su est disponible et désactive SELinux via su -c.
+    Sur les images Play Store, adb root n'est pas disponible — on passe par Magisk.
+    """
     try:
-        out = subprocess.check_output(
-            f"{ADB_BINARY} -s {serial} shell id",
-            shell=True, encoding='utf-8', errors='replace'
-        )
-        if "uid=0(root)" not in out:
-            for attempt in range(1, 6):
-                try:
-                    logger.info(f"[{serial}] adb root attempt {attempt}")
-                    subprocess.run(
-                        f"{ADB_BINARY} -s {serial} root",
-                        shell=True, check=True,
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-                    )
-                    subprocess.run(
-                        f"{ADB_BINARY} -s {serial} wait-for-device",
-                        shell=True, check=True, timeout=120
-                    )
+        for attempt in range(1, 6):
+            try:
+                out = subprocess.check_output(
+                    f'{ADB_BINARY} -s {serial} shell "su -c id"',
+                    shell=True, encoding='utf-8', errors='replace', timeout=10
+                )
+                if "uid=0(root)" in out:
+                    logger.info(f"[{serial}] Magisk su OK (uid=0)")
                     break
-                except subprocess.CalledProcessError:
-                    time.sleep(3)
-            else:
-                logger.error(f"[{serial}] Impossible de passer en mode root")
-                return False
+                logger.warning(f"[{serial}] su attempt {attempt}: {out.strip()}")
+            except Exception:
+                logger.warning(f"[{serial}] su attempt {attempt} échoué")
+            time.sleep(3)
+        else:
+            logger.error(f"[{serial}] Impossible d'obtenir root via Magisk su")
+            return False
 
-        logger.info(f"[{serial}] setenforce 0")
+        logger.info(f"[{serial}] setenforce 0 via su")
         subprocess.run(
-            f"{ADB_BINARY} -s {serial} shell setenforce 0",
-            shell=True, check=False
+            f'{ADB_BINARY} -s {serial} shell "su -c setenforce 0"',
+            shell=True, check=False, timeout=10
         )
         return True
     except Exception as e:
-        logger.error(f"[{serial}] Erreur environnement root: {e}")
+        logger.error(f"[{serial}] Erreur environnement root Magisk: {e}")
         return False
 
 

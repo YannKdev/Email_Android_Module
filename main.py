@@ -48,6 +48,8 @@ _RESULT_LABELS = {
     "FAILED_GO_TO_LOGIN":                   "Login introuvable (max tentatives)",
     # Play Store requis
     "PLAY_STORE_REQUIRED":                  "Erreur : Play Store requis",
+    # HAR manquant malgré résultat positif
+    "ERROR_HAR_NOT_CAPTURED":               "Erreur: HAR non capturé",
     # Arrêts volontaires
     "ERROR_CHROME":                         "Stop: Chrome en premier plan",
     "APP_QUIT":                             "Stop: App quittée",
@@ -123,7 +125,7 @@ EMULATOR_STATES = {}  # serial -> "RUNNING" | "STARTING" | "OFFLINE"
 EMULATOR_LOCKS  = {}  # serial -> threading.Lock()
 STOP_EVENT      = threading.Event()
 ADB_LOCK        = threading.Lock()
-ROOT_CONFIG     = {}  # serial -> proxy_port
+MAGISK_CONFIG   = {}  # serial -> proxy_port
 WORKER_THREADS  = []
 
 
@@ -166,7 +168,7 @@ def restart_emulator(serial, avd_mapping, emulator_path=EMULATOR_BINARY):
         port     = serial.split("-")[-1]
         port_int = int(port)
 
-        logger.info(f"[{serial}] Redémarrage (ROOT)")
+        logger.info(f"[{serial}] 🔄 Redémarrage en cours...")
 
         # Kill si accroché
         try:
@@ -184,118 +186,60 @@ def restart_emulator(serial, avd_mapping, emulator_path=EMULATOR_BINARY):
         subprocess.Popen(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         # Attente ADB
-        logger.info(f"[{serial}] wait-for-device...")
         subprocess.run(f"{ADB_BINARY} -s {serial} wait-for-device", shell=True, timeout=120)
-        logger.info(f"[{serial}] device visible par ADB")
 
         # Attente boot complet
-        logger.info(f"[{serial}] wait-for-boot...")
         if not wait_for_boot(serial):
             logger.error(f"[{serial}] Boot timeout")
             EMULATOR_STATES[serial] = "OFFLINE"
             Database.update_emulator_status(serial, "OFFLINE")
             return False
-        logger.info(f"[{serial}] boot completed")
 
-        logger.info(f"[{serial}] attente Android ready...")
         if not wait_for_android_ready(serial):
             logger.error(f"[{serial}] Android pas prêt")
             EMULATOR_STATES[serial] = "OFFLINE"
             Database.update_emulator_status(serial, "OFFLINE")
             return False
-        logger.info(f"[{serial}] Android ready")
 
-        # Vérification présence microG / GMS
-        _GMS_PACKAGES = ["com.google.android.gms", "com.android.vending"]
-        try:
-            pm_out = subprocess.check_output(
-                f"{ADB_BINARY} -s {serial} shell pm list packages",
-                shell=True, text=True, timeout=10
-            )
-            installed = set(line.replace("package:", "").strip() for line in pm_out.splitlines())
-            for pkg in _GMS_PACKAGES:
-                if pkg in installed:
-                    logger.info(f"[{serial}] GMS ✓ {pkg}")
-                else:
-                    logger.warning(f"[{serial}] GMS ✗ {pkg} NON installé — lancer Scripts/setup_microg.py")
-        except Exception as e:
-            logger.warning(f"[{serial}] Impossible de vérifier les packages GMS : {e}")
+        # Play Store natif — GMS et com.android.vending sont toujours présents
 
         # Attente port TCP ouvert
-        logger.info(f"[{serial}] attente port TCP {port_int}...")
         if not wait_for_tcp_port(port=port_int, timeout=60):
             logger.error(f"[{serial}] Port TCP {port_int} indisponible")
             EMULATOR_STATES[serial] = "OFFLINE"
             Database.update_emulator_status(serial, "OFFLINE")
             return False
-        logger.info(f"[{serial}] port TCP {port_int} OK")
 
         time.sleep(5)
 
-        # Configuration root
-        logger.info(f"[{serial}] Configuration environnement root...")
+        # Configuration root via Magisk su (adb root indisponible sur images Play Store)
         if not ensure_root_environment(serial):
             logger.error(f"[{serial}] impossible de passer en root")
             EMULATOR_STATES[serial] = "OFFLINE"
             Database.update_emulator_status(serial, "OFFLINE")
             return False
 
-        # Injection cert mitmproxy comme cert système (bind mount, survit pas au reboot)
-        logger.info(f"[{serial}] Injection cert mitmproxy en cert système...")
-
-        r1 = subprocess.run(
-            f"{ADB_BINARY} -s {serial} shell 'cp -r /system/etc/security/cacerts /data/local/tmp/cacerts 2>/dev/null || true'",
-            shell=True, timeout=15, capture_output=True, text=True
-        )
-        logger.info(f"[{serial}] [cert] cp cacerts -> {r1.returncode} {r1.stderr.strip() or 'OK'}")
-
-        # Push le cert directement depuis le host (source of truth = ~/.mitmproxy/mitmproxy-ca-cert.pem)
-        mitm_cert_host = os.path.expanduser("~/.mitmproxy/mitmproxy-ca-cert.pem")
-        r2 = subprocess.run(
-            f"{ADB_BINARY} -s {serial} push {mitm_cert_host} /data/local/tmp/cacerts/c8750f0d.0",
-            shell=True, timeout=10, capture_output=True, text=True
-        )
-        if r2.returncode == 0:
-            subprocess.run(
-                f"{ADB_BINARY} -s {serial} shell 'chmod 644 /data/local/tmp/cacerts/c8750f0d.0'",
-                shell=True, timeout=5, capture_output=True, text=True
-            )
-        logger.info(f"[{serial}] [cert] push mitmproxy-ca-cert.pem -> {r2.returncode} {r2.stderr.strip() or 'OK'}")
-
-        r3 = subprocess.run(
-            f"{ADB_BINARY} -s {serial} shell 'su 0 mount --bind /data/local/tmp/cacerts /system/etc/security/cacerts'",
-            shell=True, timeout=10, capture_output=True, text=True
-        )
-        logger.info(f"[{serial}] [cert] mount --bind -> {r3.returncode} {r3.stderr.strip() or 'OK'}")
-
-        # Vérification finale
-        r4 = subprocess.run(
+        # Cert mitmproxy installé de façon permanente via module Magisk → vérification seulement
+        r_cert = subprocess.run(
             f"{ADB_BINARY} -s {serial} shell 'ls /system/etc/security/cacerts/ | grep c8750f0d'",
             shell=True, timeout=10, capture_output=True, text=True
         )
-        if r4.returncode == 0 and "c8750f0d" in r4.stdout:
-            logger.info(f"[{serial}] Cert mitmproxy injecté en cert système ✓")
-        else:
-            logger.warning(f"[{serial}] Cert mitmproxy NON trouvé en cert système ✗ (stdout={r4.stdout.strip()})")
+        if r_cert.returncode != 0 or "c8750f0d" not in r_cert.stdout:
+            logger.warning(f"[{serial}] Cert mitmproxy ABSENT des certs système — réinstaller via module Magisk")
 
-        # Nettoyage proxy résiduel
-        logger.info(f"[{serial}] Nettoyage proxy résiduel...")
+        # Nettoyage proxy résiduel via su (settings global nécessite root sur Play Store)
         for key in ("http_proxy", "global_http_proxy_host", "global_http_proxy_port"):
             subprocess.run(
-                f"{ADB_BINARY} -s {serial} shell settings delete global {key}",
+                f"{ADB_BINARY} -s {serial} shell 'su -c \"settings delete global {key}\"'",
                 shell=True, timeout=10,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
 
-        logger.info(f"[{serial}] Stabilisation ({STABILIZATION_DELAY}s)...")
         time.sleep(STABILIZATION_DELAY)
-
-        logger.info(f"[{serial}] Check popup ({POPUP_CHECK_DELAY}s)...")
         time.sleep(POPUP_CHECK_DELAY)
 
         with ADB_LOCK:
             adb_utils.dismiss_not_responding_popup(serial)
-            logger.info(f"[{serial}] Suppression des apps tierces...")
             adb_utils.uninstall_all_third_party_packages(serial)
 
         if not is_device_online(serial):
@@ -306,7 +250,7 @@ def restart_emulator(serial, avd_mapping, emulator_path=EMULATOR_BINARY):
 
         EMULATOR_STATES[serial] = "RUNNING"
         Database.update_emulator_status(serial, "RUNNING")
-        logger.info(f"[{serial}] prêt (ROOT)")
+        logger.info(f"[{serial}] 🟢 prêt")
         return True
 
     finally:
@@ -362,7 +306,7 @@ def _read_har_file(har_path: str, device_id: str):
         dict si des entrées réseau ont été capturées, None sinon
     """
     if not os.path.exists(har_path) or os.path.getsize(har_path) == 0:
-        logger.info(f"[{device_id}] Aucun fichier HAR généré")
+        logger.info(f"[{device_id}] ⚫ 0 logs HAR générés.")
         return None
 
     try:
@@ -370,16 +314,16 @@ def _read_har_file(har_path: str, device_id: str):
             content = f.read()
 
         if not content.strip():
-            logger.info(f"[{device_id}] Fichier HAR vide")
+            logger.info(f"[{device_id}] ⚫ 0 logs HAR générés.")
             return None
 
         har_content = json.loads(content)
         entries_count = len(har_content.get("log", {}).get("entries", []))
         if entries_count > 0:
-            logger.info(f"[{device_id}] HAR capturé : {entries_count} entrée(s) réseau")
+            logger.info(f"[{device_id}] 🟢 {entries_count} logs HAR générés.")
             return har_content
         else:
-            logger.info(f"[{device_id}] HAR vide (aucune correspondance réseau)")
+            logger.info(f"[{device_id}] ⚫ 0 logs HAR générés.")
             return None
 
     except json.JSONDecodeError as e:
@@ -419,7 +363,6 @@ def _reset_network(serial: str):
         )
         airplane_on = False
         time.sleep(5)
-        logger.info(f"[{serial}] Reset réseau OK")
     except subprocess.TimeoutExpired:
         logger.warning(f"[{serial}] Timeout sur reset réseau")
     finally:
@@ -446,15 +389,15 @@ def _cleanup_after_analysis(serial: str, package_id: str, proxy_port: int):
         logger.warning(f"[{serial}] Émulateur offline, skip nettoyage")
         return
 
-    # Suppression proxy
+    # Suppression proxy via su (settings global nécessite root sur Play Store)
     try:
         for key in ("http_proxy", "global_http_proxy_host", "global_http_proxy_port"):
             subprocess.run(
-                f"{ADB_BINARY} -s {serial} shell settings delete global {key}",
+                f"{ADB_BINARY} -s {serial} shell 'su -c \"settings delete global {key}\"'",
                 shell=True, timeout=10,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
-        logger.info(f"[{serial}] Proxy supprimé")
+        pass  # Proxy supprimé (log en warning si timeout ci-dessus)
     except subprocess.TimeoutExpired:
         logger.warning(f"[{serial}] Timeout suppression proxy")
 
@@ -468,13 +411,11 @@ def _cleanup_after_analysis(serial: str, package_id: str, proxy_port: int):
             shell=True, timeout=30,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
-        logger.info(f"[{serial}] Désinstallation {package_id} OK")
     except subprocess.TimeoutExpired:
         logger.warning(f"[{serial}] Timeout désinstallation {package_id}")
 
     # Fermeture des apps résiduelles + vérification mode avion
     adb_utils.close_all_apps(serial)
-    logger.info(f"[{serial}] Apps résiduelles fermées")
     if adb_utils.disable_airplane_mode_if_on(serial):
         logger.warning(f"[{serial}] Mode avion était actif — désactivé avant prochaine analyse")
 
@@ -483,33 +424,41 @@ def _cleanup_after_analysis(serial: str, package_id: str, proxy_port: int):
         logger.warning(f"[{serial}] Connectivité hôte perdue après nettoyage!")
         restore_host_connectivity(serial, proxy_port)
 
+    # Suppression du dossier APK
+    apk_folder = os.path.join(PACKAGES_BASE_PATH, package_id)
+    if os.path.isdir(apk_folder):
+        shutil.rmtree(apk_folder, ignore_errors=True)
+
+    logger.info(f"[{serial}] ✅ {package_id} - désinstallation et reset validé")
+
 
 # ==========================================================
-# ===================== ROOT WORKER ========================
+# ==================== MAGISK WORKER =======================
 # ==========================================================
 
-def root_worker(serial):
+def magisk_worker(serial):
     """
-    Worker ROOT : récupère les packages depuis packages_full_pipeline
+    Worker MAGISK (Play Store + Magisk + Play Integrity Fix) :
+    récupère les packages depuis packages_full_pipeline
     (frida_analyze IS NULL), installe depuis le dossier local, analyse,
     stocke le résultat et marque comme terminé.
     S'arrête quand il n'y a plus de packages à traiter.
     """
-    proxy_port = ROOT_CONFIG[serial]
+    proxy_port = MAGISK_CONFIG[serial]
 
-    logger.info(f"[ROOT] Worker démarré pour {serial}")
+    logger.info(f"[MAGISK] Worker démarré pour {serial}")
 
     # Attente que l'émulateur soit prêt
     while not is_device_online(serial) or EMULATOR_STATES.get(serial) != "RUNNING":
         logger.info(f"[{serial}] attente démarrage (state={EMULATOR_STATES.get(serial)})...")
         time.sleep(2)
 
-    # Nettoyage proxy initial
+    # Nettoyage proxy initial via su (settings global nécessite root sur Play Store)
     logger.info(f"[{serial}] Nettoyage proxy initial...")
     try:
         for key in ("http_proxy", "global_http_proxy_host", "global_http_proxy_port"):
             subprocess.run(
-                f"{ADB_BINARY} -s {serial} shell settings delete global {key}",
+                f"{ADB_BINARY} -s {serial} shell 'su -c \"settings delete global {key}\"'",
                 shell=True, timeout=10,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
@@ -530,7 +479,7 @@ def root_worker(serial):
             STOP_EVENT.wait(timeout=600)
             continue
 
-        logger.info(f"[{serial}] Package récupéré : {package_id}")
+        logger.info(f"[{serial}] 📦 {package_id}")
         analysis_completed = False
 
         # Rotation capture_all.har → capture_all_previous.har avant la nouvelle analyse
@@ -573,11 +522,11 @@ def root_worker(serial):
             # Nettoyage processus orphelins
             cleanup_orphan_processes(proxy_port, serial)
 
-            # Nettoyage proxy pré-analyse
+            # Nettoyage proxy pré-analyse via su
             try:
                 for key in ("http_proxy", "global_http_proxy_host", "global_http_proxy_port"):
                     subprocess.run(
-                        f"{ADB_BINARY} -s {serial} shell settings delete global {key}",
+                        f"{ADB_BINARY} -s {serial} shell 'su -c \"settings delete global {key}\"'",
                         shell=True, timeout=10,
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
                     )
@@ -599,11 +548,26 @@ def root_worker(serial):
                 package_id, serial, proxy_port,
                 timeout=360, health_check=health_check
             )
-            logger.info(f"[{serial}] Analyse terminée : {package_id} → {resp}")
+            result_emoji = "❌" if resp and resp.startswith(("ERROR_", "TIMEOUT", "UNKOWN_")) else "✅"
+            logger.info(f"[{serial}] {result_emoji} Analyse terminée : {package_id} → {resp}")
 
             # --- Lecture du HAR (laissé par analyze_app) ---
             har_path = os.path.join("temp", serial, "capture.har")
             har_data = _read_har_file(har_path, serial)
+
+            # --- Détection HAR manquant sur résultat positif ---
+            _HAR_EXPECTED = ("END_EMAIL_UNIQUE_SUBMIT_POSITIVE", "END_EMAIL_MDP_OK_POSITIVE")
+            if resp in _HAR_EXPECTED and har_data is None:
+                logger.warning(f"[{serial}] HAR non capturé pour {package_id} (résultat: {resp})")
+                capture_all_src = os.path.join("temp", serial, "capture_all.har")
+                if os.path.exists(capture_all_src):
+                    dest_dir = os.path.join("results", package_id)
+                    os.makedirs(dest_dir, exist_ok=True)
+                    shutil.copy2(capture_all_src, os.path.join(dest_dir, "capture_all.har"))
+                    logger.info(f"[{serial}] capture_all.har copié → results/{package_id}/")
+                else:
+                    logger.warning(f"[{serial}] capture_all.har introuvable pour {package_id}")
+                resp = "ERROR_HAR_NOT_CAPTURED"
 
             # --- Enregistrement du résultat ---
             explicit = _get_explicit_label(resp or "")
@@ -679,7 +643,6 @@ def root_worker(serial):
         finally:
             if package_id:
                 Database.touch_frida_analyze_at(package_id)
-                logger.info(f"[{serial}] Nettoyage post-analyse : {package_id}")
                 _cleanup_after_analysis(serial, package_id, proxy_port)
 
     logger.info(f"[{serial}] Worker ROOT terminé")
@@ -698,19 +661,19 @@ if __name__ == "__main__":
     # Enregistrer le handler de nettoyage uniquement dans le processus principal
     atexit.register(cleanup_on_exit)
 
-    # --- Récupération des émulateurs ROOT uniquement ---
-    ROOT_EMULATORS = [s for s, i in AVD_MAPPING.items() if i["type"] == "ROOT"]
-    ALL_DEVICES = ROOT_EMULATORS
+    # --- Récupération des émulateurs MAGISK (Play Store + Magisk) ---
+    MAGISK_EMULATORS = [s for s, i in AVD_MAPPING.items() if i["type"] == "MAGISK"]
+    ALL_DEVICES = MAGISK_EMULATORS
 
     # --- Log dédié par émulateur ---
     for serial in ALL_DEVICES:
         config.setup_emulator_logger(serial)
 
-    if not ROOT_EMULATORS:
-        logger.error("Aucun émulateur ROOT configuré dans AVD_MAPPING. Arrêt.")
+    if not MAGISK_EMULATORS:
+        logger.error("Aucun émulateur MAGISK configuré dans AVD_MAPPING. Arrêt.")
         sys.exit(1)
 
-    logger.info(f"Émulateurs ROOT configurés: {ROOT_EMULATORS}")
+    logger.info(f"Émulateurs MAGISK configurés: {MAGISK_EMULATORS}")
     logger.info(f"Dossier APKs: {PACKAGES_BASE_PATH}")
 
     # --- Remise à zéro des packages bloqués (crash précédent) ---
@@ -730,11 +693,11 @@ if __name__ == "__main__":
     for serial in ALL_DEVICES:
         EMULATOR_STATES[serial] = "OFFLINE"
         EMULATOR_LOCKS[serial]  = threading.Lock()
-        Database.add_emulator(serial, "Root", status="OFFLINE")
+        Database.add_emulator(serial, "Magisk", status="OFFLINE")
 
-    # --- Ports proxy ROOT ---
-    for idx, serial in enumerate(ROOT_EMULATORS):
-        ROOT_CONFIG[serial] = config.ROOT_PORT_START + idx
+    # --- Ports proxy MAGISK ---
+    for idx, serial in enumerate(MAGISK_EMULATORS):
+        MAGISK_CONFIG[serial] = config.ROOT_PORT_START + idx
 
     # --- Dossiers temporaires ---
     for serial in ALL_DEVICES:
@@ -762,7 +725,7 @@ if __name__ == "__main__":
         logger.warning(f"Erreur daemon ADB: {e} — tentative de continuer quand même...")
 
     # --- Démarrage des émulateurs en parallèle ---
-    logger.info("Démarrage des émulateurs ROOT en parallèle...")
+    logger.info("Démarrage des émulateurs MAGISK (Play Store) en parallèle...")
 
     def start_emulator(serial):
         success = restart_emulator(serial, AVD_MAPPING)
@@ -792,16 +755,16 @@ if __name__ == "__main__":
     watchdog_thread.start()
     logger.info("Watchdog des émulateurs actif")
 
-    # --- Lancement des workers ROOT ---
-    for serial in ROOT_EMULATORS:
+    # --- Lancement des workers MAGISK ---
+    for serial in MAGISK_EMULATORS:
         while EMULATOR_STATES.get(serial) != "RUNNING":
             time.sleep(1)
-        t = threading.Thread(target=root_worker, args=(serial,), name=f"ROOT-{serial}")
+        t = threading.Thread(target=magisk_worker, args=(serial,), name=f"MAGISK-{serial}")
         t.start()
         WORKER_THREADS.append(t)
-        logger.info(f"[ROOT] Worker lancé pour {serial}")
+        logger.info(f"[MAGISK] Worker lancé pour {serial}")
 
-    logger.info("PIPELINE ACTIF — En attente de la fin des analyses...")
+    logger.info("🚀 PIPELINE ACTIF — En attente de la fin des analyses...")
 
     # --- Boucle principale : attente de la fin de tous les workers ---
     try:

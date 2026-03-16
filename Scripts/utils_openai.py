@@ -96,7 +96,7 @@ def analyze_login_entry(
 
     where_tap = result.get("where_tap")
     if isinstance(where_tap, dict):
-        is_back   = where_tap == {"action": "BACK"}
+        is_back   = where_tap.get("action") == "BACK"
         is_coords = {"x", "y"} <= where_tap.keys()
         if not is_back and not is_coords:
             raise ValueError(f"where_tap invalide: {where_tap}")
@@ -204,6 +204,18 @@ def analyze_email_exists(device_id, add_screenshot: bool = False, package_name: 
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+# Accumulateur de tokens par analyse (réinitialisé avant chaque app)
+_token_counter = {"input": 0, "output": 0}
+
+
+def reset_token_counter():
+    _token_counter["input"] = 0
+    _token_counter["output"] = 0
+
+
+def get_token_count() -> dict:
+    return dict(_token_counter)
+
 
 class OpenAIJSONError(Exception):
     pass
@@ -257,6 +269,8 @@ def call_openai_text_json(
                 raise OpenAIJSONError("Réponse vide du modèle")
             parsed = _parse_json_response(output_text)
             usage = response.usage
+            _token_counter["input"] += usage.input_tokens
+            _token_counter["output"] += usage.output_tokens
             logger.info(f"OpenAI response: {parsed} | tokens: {usage.input_tokens}in/{usage.output_tokens}out")
             return parsed
         except OpenAIJSONError as e:
@@ -308,6 +322,8 @@ def call_openai_image_json(
                 raise OpenAIJSONError("Réponse vide du modèle")
             parsed = _parse_json_response(output_text)
             usage = response.usage
+            _token_counter["input"] += usage.input_tokens
+            _token_counter["output"] += usage.output_tokens
             logger.info(f"OpenAI response: {parsed} | tokens: {usage.input_tokens}in/{usage.output_tokens}out")
             return parsed
         except OpenAIJSONError as e:

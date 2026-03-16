@@ -38,10 +38,15 @@ Si la page contient un champ de saisie pour email (et éventuellement mot de pas
 - Un champ "username" ou "phone" seul ne suffit pas : ignorer et chercher un vrai champ email
 
 3. OTHER
-Si la page n'est pas un login email mais qu'il existe le moindre élément cliquable susceptible de mener vers un login ou register (bouton "Sign in", "Log in", "Continue", "Get started", menu, icône profil, lien...) :
+Si la page n'est pas un login email mais qu'il existe le moindre élément susceptible de mener vers un login :
 - "etat": "OTHER"
 - "where_tap": coordonnées de l'élément le plus prometteur (différent des already_tapped si possible)
 - En cas de doute, préfère OTHER à NO_EMAIL_LOGIN : il vaut mieux explorer une piste incertaine que d'abandonner
+
+PRIORITÉ ABSOLUE dans OTHER :
+- Un lien "Log in", "Already have an account", "I already have an account", "Sign in" (même dans un TextView non marqué clickable) DOIT être tapé EN PRIORITÉ sur tout bouton "Sign up with Email" / "Register"
+- "Sign up with Email", "Register with email", "Create account with email" sont des boutons d'INSCRIPTION (register), PAS de login — ne pas les confondre avec un login email
+- Les TextViews contenant "Log in" ou "Sign in" dans leur texte sont des liens tappables même sans clickable: true
 
 4. NO_EMAIL_LOGIN
 Si l'écran de connexion ne propose MANIFESTEMENT que des options sociales (Google, Facebook, Apple, téléphone) sans aucun lien, bouton ou chemin plausible vers un login par email :
