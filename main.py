@@ -268,11 +268,14 @@ def emulator_watchdog(avd_mapping, interval=15):
             state = EMULATOR_STATES.get(serial, "OFFLINE")
             if state == "STARTING":
                 continue
-            if not is_device_online(serial):
+            online = is_device_online(serial)
+            if not online or state == "OFFLINE":
                 if state == "RUNNING":
                     logger.warning(f"[{serial}] a crashé (était RUNNING), redémarrage...")
-                else:
+                elif not online:
                     logger.warning(f"[{serial}] offline, tentative de redémarrage")
+                else:
+                    logger.warning(f"[{serial}] état OFFLINE (service Android mort), redémarrage forcé...")
                 restart_emulator(serial, avd_mapping)
         time.sleep(interval)
 
@@ -570,6 +573,13 @@ def magisk_worker(serial):
                 resp = "ERROR_HAR_NOT_CAPTURED"
 
             # --- Enregistrement du résultat ---
+            if resp == "ERROR_NO_INTERNET":
+                logger.warning(f"[{serial}] Internet KO détecté → redémarrage émulateur + remise en attente de {package_id}")
+                Database.reset_package_to_pending(package_id)
+                analysis_completed = True
+                restart_emulator(serial, AVD_MAPPING)
+                continue
+
             explicit = _get_explicit_label(resp or "")
             if resp and resp.startswith(("ERROR_", "TIMEOUT", "UNKOWN_")):
                 Database.set_frida_error(package_id, resp, explicit_result=explicit)

@@ -188,30 +188,41 @@ def disable_android_animations(device_id: str):
 
     print(f"✅ All animations disabled on {device_id}.")
 
-def take_ui_xml(device_id: str, path=None):
+def take_ui_xml(device_id: str, path=None, retries: int = 3, retry_delay: float = 2.0):
     """
     Dump l'UI de l'appareil ciblé et la récupère localement.
-    
+    Retry automatique si uiautomator dump est tué (exit 137 / SIGKILL).
+
     Args:
         device_id (str): L'ID du device ou de l'émulateur (adb devices)
+        retries (int): Nombre de tentatives en cas d'échec (défaut: 3)
+        retry_delay (float): Secondes d'attente entre chaque tentative (défaut: 2.0)
     """
-    if(path == None):
-        path = "temp/"+device_id+"/ui.xml"
-    # Dump de l'UI sur le device
-    subprocess.run(
-        [ADB_BINARY, "-s", device_id, "shell", "uiautomator", "dump", "/sdcard/ui.xml"],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
-    )
+    import time
+    if path is None:
+        path = "temp/" + device_id + "/ui.xml"
 
-    # Récupération du fichier XML localement
-    subprocess.run(
-        [ADB_BINARY, "-s", device_id, "pull", "/sdcard/ui.xml", path],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
-    )
+    last_exc = None
+    for attempt in range(1, retries + 1):
+        try:
+            subprocess.run(
+                [ADB_BINARY, "-s", device_id, "shell", "uiautomator", "dump", "/sdcard/ui.xml"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            subprocess.run(
+                [ADB_BINARY, "-s", device_id, "pull", "/sdcard/ui.xml", path],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            return
+        except subprocess.CalledProcessError as e:
+            last_exc = e
+            if attempt < retries:
+                time.sleep(retry_delay)
+    raise last_exc
 
 #"""
 def normalize_bounds(device_id, bounds_str):
@@ -455,6 +466,41 @@ def adb_back(device_id=None):
     except subprocess.CalledProcessError as e:
         print(f"Erreur lors de l'envoi du bouton retour : {e}")
         
+def pre_click_unchecked_checkboxes(device_id: str) -> bool:
+    """
+    Parse ui.xml et clique sur tous les CheckBox/Switch non cochés (checked="false").
+    Retourne True si au moins un élément a été cliqué (le caller doit re-dumper le XML).
+    """
+    xml_path = f"temp/{device_id}/ui.xml"
+    try:
+        tree = ET.parse(xml_path)
+    except Exception:
+        return False
+    clicked = False
+    for node in tree.iter('node'):
+        cls = node.attrib.get('class', '')
+        if 'CheckBox' not in cls and 'Switch' not in cls:
+            continue
+        if node.attrib.get('checked') != 'false':
+            continue
+        if node.attrib.get('clickable') != 'true':
+            continue
+        bounds = node.attrib.get('bounds')
+        if not bounds:
+            continue
+        try:
+            left, top = map(int, bounds[1:-1].split('][')[0].split(','))
+            right, bottom = map(int, bounds[1:-1].split('][')[1].split(','))
+            cx = (left + right) // 2
+            cy = (top + bottom) // 2
+        except Exception:
+            continue
+        tap(device_id, cx, cy)
+        time.sleep(0.5)
+        clicked = True
+    return clicked
+
+
 def take_snapshot(device_id :str, screenshot:bool=False, text_only:bool=False):
     """
     Prend un snapshot de l'UI (et optionnellement un screenshot).
@@ -468,6 +514,8 @@ def take_snapshot(device_id :str, screenshot:bool=False, text_only:bool=False):
     if(screenshot):
         take_android_screenshot(device_id=device_id)
     take_ui_xml(device_id=device_id)
+    if pre_click_unchecked_checkboxes(device_id):
+        take_ui_xml(device_id=device_id)
     clean_ui_xml(device_id, text_only=text_only)
 
 def take_android_screenshot(device_id: str):
@@ -864,31 +912,54 @@ def close_all_apps(device_id: str):
         print(f"[{device_id}] Erreur close_all_apps: {e}")
 
 
+def _is_airplane_mode_on(device_id: str) -> bool:
+    """
+    Détecte le mode avion via deux sources :
+    1. settings get global airplane_mode_on (rapide)
+    2. dumpsys connectivity (fiable même si la valeur settings est absente/nulle)
+    """
+    try:
+        r = subprocess.run(
+            [ADB_BINARY, "-s", device_id, "shell", "settings", "get", "global", "airplane_mode_on"],
+            capture_output=True, text=True, timeout=5
+        )
+        if r.stdout.strip() == "1":
+            return True
+    except Exception:
+        pass
+    try:
+        r = subprocess.run(
+            [ADB_BINARY, "-s", device_id, "shell", "dumpsys", "connectivity"],
+            capture_output=True, text=True, timeout=10
+        )
+        if "AirplaneModeOn=true" in r.stdout or "airplaneModeOn=true" in r.stdout:
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def disable_airplane_mode_if_on(device_id: str) -> bool:
     """
     Vérifie si le mode avion est actif et le désactive si nécessaire.
     Retourne True si le mode avion était actif (et a été désactivé).
     """
     try:
-        result = subprocess.run(
-            [ADB_BINARY, "-s", device_id, "shell", "settings", "get", "global", "airplane_mode_on"],
-            capture_output=True, text=True, timeout=5
+        if not _is_airplane_mode_on(device_id):
+            return False
+        print(f"[{device_id}] Mode avion détecté — désactivation...")
+        subprocess.run(
+            [ADB_BINARY, "-s", device_id, "shell", "settings", "put", "global", "airplane_mode_on", "0"],
+            timeout=10, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
-        if result.stdout.strip() == "1":
-            print(f"[{device_id}] Mode avion détecté — désactivation...")
-            subprocess.run(
-                [ADB_BINARY, "-s", device_id, "shell", "settings", "put", "global", "airplane_mode_on", "0"],
-                timeout=10, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-            )
-            subprocess.run(
-                [ADB_BINARY, "-s", device_id, "shell", "am", "broadcast",
-                 "-a", "android.intent.action.AIRPLANE_MODE", "--ez", "state", "false"],
-                timeout=10, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-            )
-            time.sleep(3)
-            print(f"[{device_id}] Mode avion désactivé")
-            return True
-        return False
+        subprocess.run(
+            [ADB_BINARY, "-s", device_id, "shell", "am", "broadcast",
+             "-a", "android.intent.action.AIRPLANE_MODE", "--ez", "state", "false"],
+            timeout=10, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        time.sleep(3)
+        print(f"[{device_id}] Mode avion désactivé")
+        return True
     except Exception as e:
         print(f"[{device_id}] Erreur disable_airplane_mode_if_on: {e}")
         return False
@@ -896,7 +967,7 @@ def disable_airplane_mode_if_on(device_id: str) -> bool:
 
 def android_has_internet(device_id: str) -> bool:
     """
-    Vérifie si l'émulateur Android a accès à Internet.
+    Vérifie si l'émulateur Android a accès à Internet via une vraie requête HTTP.
 
     Args:
         device_id (str): L'ID du device ou de l'émulateur (adb devices).
@@ -905,12 +976,13 @@ def android_has_internet(device_id: str) -> bool:
         bool: True si connecté à Internet, False sinon.
     """
     try:
-        out = subprocess.check_output(
-            [ADB_BINARY, "-s", device_id, "shell", "dumpsys", "connectivity"],
-            stderr=subprocess.DEVNULL,
+        result = subprocess.run(
+            [ADB_BINARY, "-s", device_id, "shell",
+             "ping", "-c", "1", "-W", "5", "8.8.8.8"],
+            capture_output=True,
             text=True,
-            timeout=5,
+            timeout=15,
         )
-        return "NET_CAPABILITY_VALIDATED" in out or "VALIDATED" in out
+        return result.returncode == 0
     except Exception:
         return False

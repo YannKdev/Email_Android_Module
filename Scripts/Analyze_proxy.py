@@ -97,6 +97,7 @@ class AnalysisResult(str, Enum):
     ERROR_REGISTER_PAGE         = "ERROR_REGISTER_PAGE"
     ERROR_REGISTER_EMAIL_VALUE  = "ERROR_REGISTER_EMAIL_PAGE_VALUE"
     PLAY_STORE_REQUIRED         = "PLAY_STORE_REQUIRED"
+    ERROR_NO_INTERNET           = "ERROR_NO_INTERNET"
 
 
 def check_chrome_foreground(device_id: str):
@@ -359,6 +360,47 @@ class SimpleCaptureAddon:
 
     def tls_failed_client(self, tls_start):
         # Appelé quand le handshake TLS échoue côté client (app Android → mitmproxy)
+        import datetime
+        try:
+            addr = tls_start.context.server.address
+            host = addr[0] if addr else "unknown"
+            port = addr[1] if addr else 0
+            error = str(tls_start.error) if getattr(tls_start, "error", None) else "TLS handshake failed"
+
+            # Archiver l'échec TLS dans capture_all.har
+            tls_entry = {
+                "startedDateTime": datetime.datetime.utcnow().isoformat() + "Z",
+                "time": 0,
+                "_tls_failed": True,
+                "_tls_error": error,
+                "request": {
+                    "method": "CONNECT",
+                    "url": f"https://{host}:{port}",
+                    "httpVersion": "unknown",
+                    "headers": [],
+                    "queryString": [],
+                    "postData": {"mimeType": "", "text": ""},
+                    "headersSize": -1,
+                    "bodySize": 0,
+                },
+                "response": {
+                    "status": 0,
+                    "statusText": f"TLS_FAILED: {error}",
+                    "httpVersion": "unknown",
+                    "headers": [],
+                    "content": {"size": 0, "mimeType": "", "text": ""},
+                    "redirectURL": "",
+                    "headersSize": -1,
+                    "bodySize": 0,
+                },
+                "cache": {},
+                "timings": {"send": 0, "wait": 0, "receive": 0},
+            }
+            self.archive_entries.append(tls_entry)
+            self._save_archive_file()
+        except Exception:
+            pass
+
         if not self.debug_file:
             return
         try:
@@ -366,7 +408,6 @@ class SimpleCaptureAddon:
             host = addr[0] if addr else "unknown"
             port = addr[1] if addr else 0
             error = str(tls_start.error) if getattr(tls_start, "error", None) else "TLS handshake failed"
-            # Mettre à jour l'entrée connect correspondante (la plus récente pour ce host:port)
             for entry in reversed(self.debug_entries):
                 if entry.get("stage") == "connect" and entry.get("host") == host and entry.get("port") == port and entry.get("tls_status") == "pending":
                     entry["tls_status"] = "failed"
@@ -716,11 +757,20 @@ def _handle_email_unique(
     adb_utils.type_text(device_id, text="test@gmail.com")
     time.sleep(2)
     adb_utils.press_enter(device_id)
-    time.sleep(2)
+    time.sleep(5)
+
+    # Si une capture HAR a déjà été générée par l'Enter, pas besoin de cliquer submit
+    har_path = os.path.join("temp", device_id, "capture.har")
+    if os.path.exists(har_path) and os.path.getsize(har_path) > 0:
+        logger.info(f"[{device_id}] HAR capturé après Enter — pas de clic submit nécessaire.")
+        return AnalysisResult.END_EMAIL_UNIQUE_NO_SUBMIT
+
+    # Pas de HAR : cacher le clavier, re-demander à l'IA les coords fraîches du bouton submit
     adb_utils.hide_keyboard(device_id)
-    time.sleep(1)
+    time.sleep(2)
     check_foreground(device_id, package_id)
-    if _tap_submit(device_id, resp, screen_w, screen_h):
+    resp_fresh = utils_openai.analyze_login_page(device_id, package_name=package_id)
+    if _tap_submit(device_id, resp_fresh, screen_w, screen_h):
         logger.info(f"[{device_id}] Submitted fake email on login page (Email only).")
         return AnalysisResult.END_EMAIL_UNIQUE_SUBMIT
     logger.info(f"[{device_id}] No submit button on login page (Email only).")
@@ -933,7 +983,8 @@ def analyze_app(package_id, device_id, port, health_check_callback=None):
                 health_check_callback()
 
             if not adb_utils.android_has_internet(device_id):
-                logger.warning(f"[{device_id}] [internet: KO]")
+                logger.warning(f"[{device_id}] [internet: KO] → arrêt analyse")
+                return AnalysisResult.ERROR_NO_INTERNET
             else:
                 logger.info(f"[{device_id}] [internet: OK]")
 
