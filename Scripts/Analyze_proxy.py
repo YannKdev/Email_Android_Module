@@ -66,7 +66,9 @@ def check_foreground(device_id: str, package_id: str):
     """
     Vérifie que l'app analysée est bien en premier plan.
     Lève ChromeForegroundError si Chrome est détecté.
-    Lève AppQuitError si une autre app (non-système) est au premier plan.
+    Si une autre app est au premier plan, tente d'abord un appui sur Back :
+      - si l'app revient au premier plan → continue normalement
+      - sinon → lève AppQuitError
     Ne fait rien si le foreground ne peut pas être déterminé.
     """
     fg = adb_utils.get_foreground_package(device_id)
@@ -75,7 +77,14 @@ def check_foreground(device_id: str, package_id: str):
     if "chrome" in fg.lower():
         raise ChromeForegroundError(f"Chrome détecté en premier plan sur {device_id}")
     if package_id and fg != package_id:
-        raise AppQuitError(f"[{device_id}] App {package_id} quittée — premier plan: {fg}")
+        logger.info(f"[{device_id}] App {package_id} pas au premier plan ({fg}), tentative Back...")
+        adb_utils.adb_back(device_id)
+        time.sleep(1.5)
+        fg2 = adb_utils.get_foreground_package(device_id)
+        if fg2 and fg2 == package_id:
+            logger.info(f"[{device_id}] App {package_id} revenue au premier plan après Back, continuation.")
+            return
+        raise AppQuitError(f"[{device_id}] App {package_id} quittée — premier plan après Back: {fg2 or fg}")
 
 
 class AnalysisResult(str, Enum):

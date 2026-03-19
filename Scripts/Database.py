@@ -1091,6 +1091,32 @@ def complete_package_analysis(package_id, result=None, explicit_result=None):
         return False
 
 
+def set_request_auto(package_id):
+    """
+    Marque request_auto = TRUE pour un package dont l'API révèle l'existence d'un email.
+
+    Args:
+        package_id (str): Identifiant du package
+
+    Returns:
+        bool: True si succès, False sinon
+    """
+    try:
+        with get_cursor() as cur:
+            cur.execute(
+                """
+                UPDATE packages_full_pipeline
+                SET request_auto = TRUE
+                WHERE package_id = %s;
+                """,
+                (package_id,)
+            )
+        return True
+    except Exception as e:
+        logger.error(f"Erreur set_request_auto ({package_id}): {e}")
+        return False
+
+
 def touch_frida_analyze_at(package_id):
     """
     Met à jour frida_analyze_at = NOW() si elle est encore NULL.

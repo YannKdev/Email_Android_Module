@@ -30,6 +30,8 @@ pipeline.pid
 
 # Results
 results/
+results_script/
+results_scripts/
 
 # Node (Frida tests)
 Frida_hook/test/node_modules/

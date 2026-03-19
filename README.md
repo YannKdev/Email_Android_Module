@@ -2,6 +2,8 @@
 
 Projet ayant pour objectif de récupérer automatiquement les endpoints API d'applications Android de test de présence d'email à faibles coûts : serveur x86 avec virtualisation KVM (15€/mois), tokens IA limités (~20€ pour 10 000 apps analysées).
 
+L'analyse statique du code par IA est possible (et efficace) nottament avec Claude Code. Cependant cela necessite plus de puissance (décompilation) et une grosse quantité de token : [Android Reverse Engineering & API Extraction — Claude Code skill](https://github.com/SimoneAvogadro/android-reverse-engineering-skill)
+
 Plateforme regroupant les endpoints récupérés automatiquement : [osint-email-android.demo-yann.ovh](https://osint-email-android.demo-yann.ovh/)
 
 ![Screenshot de la démo](assets/screenshot_demo.png)

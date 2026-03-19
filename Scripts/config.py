@@ -57,6 +57,7 @@ if IS_PROD or IS_TEST:
     AVD_MAPPING = {
         "emulator-5554": {"avd": "Magisk_1", "type": "MAGISK"},
         "emulator-5556": {"avd": "Magisk_2", "type": "MAGISK"},
+        "emulator-5558": {"avd": "Magisk_3", "type": "MAGISK"},
     }
 
     # Chemins Ubuntu - A MODIFIER selon ton installation
@@ -91,6 +92,7 @@ else:
     AVD_MAPPING = {
         "emulator-5554": {"avd": "Magisk_1", "type": "MAGISK"},
         "emulator-5556": {"avd": "Magisk_2", "type": "MAGISK"},
+        "emulator-5558": {"avd": "Magisk_3", "type": "MAGISK"},
     }
 
     # Chemins Windows (dans le PATH)

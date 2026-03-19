@@ -16,6 +16,8 @@ import Analyze_proxy
 from Analyze_proxy import FridaCrashError
 import adb_utils
 import config  # Configuration DEV/PROD
+from har_flow_extractor import extract_flow, find_anchor_in_flow
+from har_script_generator import generate_replay_script, run_flow_analysis
 from live_view import LiveViewServer
 
 from emulator_utils import (
@@ -585,6 +587,26 @@ def magisk_worker(serial):
                 Database.set_frida_error(package_id, resp, explicit_result=explicit)
             else:
                 Database.complete_package_analysis(package_id, result=har_data, explicit_result=explicit)
+
+            # --- Flow analysis : détection email enumeration (si HAR capturé) ---
+            if har_data is not None:
+                capture_all_path = os.path.join("temp", serial, "capture_all.har")
+                if os.path.exists(capture_all_path):
+                    try:
+                        flow, anchor_idx = extract_flow(capture_all_path, verbose=False)
+                        if flow:
+                            generate_replay_script(
+                                package_id, flow, anchor_idx,
+                                output_dir=os.path.join("results_script"),
+                            )
+                            if run_flow_analysis(flow, anchor_idx, verbose=False):
+                                Database.set_request_auto(package_id)
+                                logger.info(f"[{serial}] 🔍 request_auto=TRUE → {package_id}")
+                    except Exception as e:
+                        logger.warning(f"[{serial}] Flow analysis échouée pour {package_id}: {e}")
+                else:
+                    logger.debug(f"[{serial}] capture_all.har absent, flow analysis ignorée")
+
             analysis_completed = True
             Database.increment_emulator_finished(serial)
 
